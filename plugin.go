@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -95,7 +96,16 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}, nil
 }
 
-func (p *MyPlugin) encrypt(plaintext []byte) (string, error) {
+func (p *MyPlugin) buildAAD(purpose string) []byte {
+	host := p.config.Host
+	aad := make([]byte, 4+len(purpose)+len(host))
+	binary.BigEndian.PutUint32(aad, uint32(len(purpose)))
+	copy(aad[4:], purpose)
+	copy(aad[4+len(purpose):], host)
+	return aad
+}
+
+func (p *MyPlugin) encrypt(purpose string, plaintext []byte) (string, error) {
 	block, err := aes.NewCipher(p.aesKey)
 	if err != nil {
 		return "", err
@@ -109,11 +119,11 @@ func (p *MyPlugin) encrypt(plaintext []byte) (string, error) {
 		return "", err
 	}
 	// produces nonce||ciphertext
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, p.buildAAD(purpose))
 	return base64.RawURLEncoding.EncodeToString(ciphertext), nil
 }
 
-func (p *MyPlugin) decrypt(encoded string) ([]byte, error) {
+func (p *MyPlugin) decrypt(purpose string, encoded string) ([]byte, error) {
 	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
@@ -130,21 +140,20 @@ func (p *MyPlugin) decrypt(encoded string) ([]byte, error) {
 	if len(data) < nonceSize {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
-	return gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
+	return gcm.Open(nil, data[:nonceSize], data[nonceSize:], p.buildAAD(purpose))
 }
 
 type sessionPayload struct {
-	Type      string `json:"t"`
-	ExpiresAt int64  `json:"exp"`
+	ExpiresAt int64 `json:"exp"`
 }
 
 func (p *MyPlugin) createSessionCookie(r *http.Request) (*http.Cookie, error) {
-	payload := sessionPayload{Type: "session", ExpiresAt: time.Now().Add(p.sessionDuration).Unix()}
+	payload := sessionPayload{ExpiresAt: time.Now().Add(p.sessionDuration).Unix()}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	enc, err := p.encrypt(data)
+	enc, err := p.encrypt("session", data)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +173,7 @@ func (p *MyPlugin) validSession(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	plaintext, err := p.decrypt(cookie.Value)
+	plaintext, err := p.decrypt("session", cookie.Value)
 	if err != nil {
 		return false
 	}
@@ -172,7 +181,7 @@ func (p *MyPlugin) validSession(r *http.Request) bool {
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return false
 	}
-	return time.Now().Unix() < payload.ExpiresAt && payload.Type == "session"
+	return time.Now().Unix() < payload.ExpiresAt
 }
 
 func (p *MyPlugin) discoverEndpoints() (*oidcEndpoints, error) {
@@ -200,14 +209,12 @@ func (p *MyPlugin) discoverEndpoints() (*oidcEndpoints, error) {
 }
 
 type statePayload struct {
-	Type        string `json:"t"`
 	RedirectURL string `json:"r"`
 	ExpiresAt   int64  `json:"exp"`
 }
 
 func (p *MyPlugin) encryptState(redirectURL string) (string, error) {
 	payload := statePayload{
-		Type:        "state",
 		RedirectURL: redirectURL,
 		ExpiresAt:   time.Now().Add(10 * time.Minute).Unix(),
 	}
@@ -215,11 +222,11 @@ func (p *MyPlugin) encryptState(redirectURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return p.encrypt(data)
+	return p.encrypt("state", data)
 }
 
 func (p *MyPlugin) decryptState(state string) (string, error) {
-	plaintext, err := p.decrypt(state)
+	plaintext, err := p.decrypt("state", state)
 	if err != nil {
 		return "", err
 	}
@@ -227,7 +234,7 @@ func (p *MyPlugin) decryptState(state string) (string, error) {
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return "", err
 	}
-	if time.Now().Unix() >= payload.ExpiresAt || payload.Type != "state" {
+	if time.Now().Unix() >= payload.ExpiresAt {
 		return "", fmt.Errorf("state expired")
 	}
 	return payload.RedirectURL, nil
