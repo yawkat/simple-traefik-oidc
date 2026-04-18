@@ -1,0 +1,16 @@
+displayName: "Simple Traefik OIDC Gate"
+type: middleware
+import: github.com/yawkat/simple-traefik-oidc
+
+summary: "Traefik OIDC middleware with bare-bones protection. Designed to guard against mass exploitation, will not protect against other attacks like CSRF."
+
+testData:
+  providerUrl: "https://authentik.example.com"
+  clientId: "foo"
+  clientSecret: "bar"
+  sessionKey: "fizz"
+  host: "example.com"
+  cookieSameSite: "lax"
+  sessionDurationMin: 1200
+  excludedUrls:
+  - "https://example.com/api/foo"
