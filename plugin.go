@@ -60,8 +60,7 @@ type MyPlugin struct {
 	sameSite        http.SameSite
 	sessionDuration time.Duration
 	endpoints       *oidcEndpoints
-	epOnce          sync.Once
-	epErr           error
+	epMu            sync.Mutex
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
@@ -185,27 +184,34 @@ func (p *MyPlugin) validSession(r *http.Request) bool {
 }
 
 func (p *MyPlugin) discoverEndpoints() (*oidcEndpoints, error) {
-	p.epOnce.Do(func() {
-		discoveryURL := strings.TrimRight(p.config.ProviderUrl, "/") + "/.well-known/openid-configuration"
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Get(discoveryURL)
-		if err != nil {
-			p.epErr = fmt.Errorf("oidc discovery failed: %w", err)
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			p.epErr = fmt.Errorf("oidc discovery returned %d", resp.StatusCode)
-			return
-		}
-		var ep oidcEndpoints
-		if err := json.NewDecoder(resp.Body).Decode(&ep); err != nil {
-			p.epErr = fmt.Errorf("oidc discovery decode failed: %w", err)
-			return
-		}
-		p.endpoints = &ep
-	})
-	return p.endpoints, p.epErr
+	p.epMu.Lock()
+	ep := p.endpoints
+	p.epMu.Unlock()
+	if ep != nil {
+		return ep, nil
+	}
+
+	discoveryURL := strings.TrimRight(p.config.ProviderUrl, "/") + "/.well-known/openid-configuration"
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(discoveryURL)
+	if err != nil {
+		return nil, fmt.Errorf("oidc discovery failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("oidc discovery returned %d", resp.StatusCode)
+	}
+	var newEp oidcEndpoints
+	if err := json.NewDecoder(resp.Body).Decode(&newEp); err != nil {
+		return nil, fmt.Errorf("oidc discovery decode failed: %w", err)
+	}
+
+	p.epMu.Lock()
+	defer p.epMu.Unlock()
+	if p.endpoints == nil {
+		p.endpoints = &newEp
+	}
+	return p.endpoints, nil
 }
 
 type statePayload struct {
