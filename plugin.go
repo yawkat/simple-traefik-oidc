@@ -269,7 +269,7 @@ func (p *MyPlugin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.isExcluded(requestURL(p.config.Host, r)) {
+	if p.isExcluded(r.RequestURI) {
 		p.next.ServeHTTP(w, r)
 		return
 	}
